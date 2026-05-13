@@ -15,10 +15,11 @@ mod parse;
 mod strata;
 
 use proc_macro::TokenStream;
-use proc_macro_error::{abort, emit_error, proc_macro_error};
+use proc_macro_error::{abort, proc_macro_error};
 use quote::{format_ident, quote, quote_spanned};
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Display, Formatter};
+use syn::visit_mut::{self, VisitMut};
 use syn::{parse_macro_input, spanned::Spanned, Expr, Ident, Lifetime, Pat, Type};
 
 use parse::{Clause, Fact, FactField, For, Program, Relation, RelationType, Rule};
@@ -63,22 +64,28 @@ use strata::Strata;
 /// with Crepe. It provides a couple methods and traits (here `Rel` is a
 /// placeholder for the name of your relation):
 ///
-/// - `Crepe::new()`: construct a new runtime
+/// - `Crepe::new()`: construct a new runtime with the default collection
+///   family.
+/// - `Crepe::<MyCollections>::new_with_collections()`: construct a runtime
+///   with a user-selected collection family when the program has no relation
+///   type parameters. For generic programs, the collection family is the
+///   final `Crepe` type argument. The family must implement
+///   `crepe_support::CrepeCollections`.
 /// - Implements `std::iter::Extend<Rel>` for each @input struct.
 ///   - `Crepe::extend(&mut self, iter: impl IntoIterator<Item = Rel>)`
 /// - Implements `std::iter::Extend<&'a Rel>` for each @input struct.
 ///   - `Crepe::extend(&mut self, iter: impl IntoIterator<Item = &'a Rel>)`
 /// - `Crepe::run(self)`: evaluates the Datalog program on the given inputs,
-///   consuming the runtime object, and returns a tuple of `HashSet<Rel>`s
-///   containing the final derived @output structs.
-/// - `Crepe::run_with_hasher::<S: BuildHasher + Default>(self)`: similar to the
-///   `run` method, but internally uses a custom hasher.
+///   consuming the runtime object, and returns a tuple of relation sets from
+///   the runtime's collection family. Rust infers the associated return types
+///   from the `Crepe` type.
 ///
 /// In order for the engine to work, all relations must be tuple structs, and
-/// they automatically derive the `Eq`, `PartialEq`, `Hash`, `Copy`, and
-/// `Clone` traits. This is necessary in order to create efficient indices that
-/// are used in Datalog evaluation. If you want to use Crepe with types that
-/// do not implement `Copy`, consider passing references instead.
+/// they automatically derive the `Eq`, `PartialEq`, `Copy`, and `Clone`
+/// traits. Generic relation type parameters receive the same value-semantic
+/// bounds, while collection-specific storage requirements come from the
+/// selected `crepe_support` collection family. If you want to use Crepe with
+/// types that do not implement `Copy`, consider passing references instead.
 ///
 /// # Datalog Syntax Extensions
 /// This library supports arbitrary Rust expression syntax within rules for
@@ -354,7 +361,7 @@ impl Context {
 
             for r in rels_output.values() {
                 if r.generics.lifetimes().next().is_some() {
-                    emit_error!(
+                    abort!(
                         r.generics,
                         "Lifetime on output relation without any input relations having a lifetime"
                     );
@@ -493,16 +500,26 @@ impl Index {
         Ident::new(&self.to_string(), self.name.span())
     }
 
-    fn key_type<'a>(&self, context: &'a Context) -> Vec<&'a Type> {
-        let rel = context
-            .get_relation(&self.name.to_string())
-            .expect("could not find relation of index name");
+    fn local_key_type(&self, rel: &Relation) -> Vec<proc_macro2::TokenStream> {
+        let lifetime = Lifetime::new("'_", self.name.span());
+        self.key_type(rel, Some(&lifetime))
+    }
+
+    fn key_type(
+        &self,
+        rel: &Relation,
+        lifetime: Option<&Lifetime>,
+    ) -> Vec<proc_macro2::TokenStream> {
         self.mode
             .iter()
             .zip(rel.fields.iter())
             .filter_map(|(mode, field)| match mode {
                 IndexMode::Bound => Some(&field.ty),
                 IndexMode::Free => None,
+            })
+            .map(|ty| {
+                let ty = replace_relation_lifetimes(ty, rel, lifetime);
+                quote! { #ty }
             })
             .collect()
     }
@@ -550,7 +567,6 @@ fn make_struct_decls(context: &Context) -> proc_macro2::TokenStream {
                     ::core::clone::Clone,
                     ::core::cmp::Eq,
                     ::core::cmp::PartialEq,
-                    ::core::hash::Hash,
                 )]
                 #(#attrs)*
                 #vis #struct_token #name #generics (#fields)#semi_token
@@ -572,13 +588,13 @@ fn make_runtime_decl(context: &Context) -> proc_macro2::TokenStream {
         })
         .collect();
 
-    let generics_decl = generic_params_decl(context);
+    let generics_decl = generic_params_decl(context, true);
 
     quote! {
         /// The Crepe runtime generated from a Datalog program.
-        #[derive(::core::default::Default)]
         pub struct Crepe #generics_decl {
             #fields
+            __crepe_collections: ::core::marker::PhantomData<fn() -> __CrepeCollections>,
         }
     }
 }
@@ -586,18 +602,62 @@ fn make_runtime_decl(context: &Context) -> proc_macro2::TokenStream {
 fn make_runtime_impl(context: &Context) -> proc_macro2::TokenStream {
     let builders = make_extend(context);
     let run = make_run(context);
+    let default_impl = make_default_impl(context);
 
-    let generics_decl = generic_params_decl(context);
+    let generics_decl = generic_params_decl(context, false);
+    let generics_args = generic_params_args(context);
+    let default_generics_decl = format_generics(generic_param_items_without_collection(context));
+    let default_generics_args = {
+        let mut items = generic_arg_items_without_collection(context);
+        items.push(quote! { ::crepe_support::DefaultCrepeCollections });
+        format_generics(items)
+    };
+
+    quote! {
+        const _: () = {
+            type __CrepeSet<__CrepeCollections, __CrepeRelation> =
+                ::crepe_support::RelationSetOf<__CrepeCollections, __CrepeRelation>;
+            type __CrepeMap<__CrepeCollections, __CrepeKey, __CrepeRelation> =
+                ::crepe_support::RelationMapOf<__CrepeCollections, __CrepeKey, __CrepeRelation>;
+            #default_impl
+
+            impl #default_generics_decl Crepe #default_generics_args {
+                pub fn new() -> Self {
+                    ::core::default::Default::default()
+                }
+            }
+
+            impl #generics_decl Crepe #generics_args {
+                pub fn new_with_collections() -> Self {
+                    ::core::default::Default::default()
+                }
+                #run
+            }
+            #builders
+        };
+    }
+}
+
+fn make_default_impl(context: &Context) -> proc_macro2::TokenStream {
+    let fields = context.rels_input.values().map(|relation| {
+        let lowercase_name = to_lowercase(&relation.name);
+        quote! {
+            #lowercase_name: ::core::default::Default::default(),
+        }
+    });
+
+    let generics_decl = generic_params_decl(context, false);
     let generics_args = generic_params_args(context);
 
     quote! {
-        impl #generics_decl Crepe #generics_args {
-            pub fn new() -> Self {
-                ::core::default::Default::default()
+        impl #generics_decl ::core::default::Default for Crepe #generics_args {
+            fn default() -> Self {
+                Self {
+                    #(#fields)*
+                    __crepe_collections: ::core::marker::PhantomData,
+                }
             }
-            #run
         }
-        #builders
     }
 }
 
@@ -607,16 +667,20 @@ fn make_extend(context: &Context) -> proc_macro2::TokenStream {
         .values()
         .map(|relation| {
             let rel_ty = relation_type(relation, LifetimeUsage::Item);
-            let generics_decl = generic_params_decl(context);
+            let generics_decl = generic_params_decl(context, false);
             let generics_args = generic_params_args(context);
             let lower = to_lowercase(&relation.name);
 
             // For the reference impl, we need to add the lifetime to the existing generics
             let ref_impl_generics = {
-                let mut items = vec![quote! { 'a }];
+                let mut items = vec![quote! { '__crepe_extend }];
+                if context.has_input_lifetime {
+                    items.push(quote! { 'a });
+                }
                 for tp in collect_generic_params(context) {
                     items.push(merge_bounds_with_required(tp));
                 }
+                items.push(collection_param(false));
                 format_generics(items)
             };
 
@@ -629,10 +693,10 @@ fn make_extend(context: &Context) -> proc_macro2::TokenStream {
                         self.#lower.extend(iter);
                     }
                 }
-                impl #ref_impl_generics ::core::iter::Extend<&'a #rel_ty> for Crepe #generics_args {
+                impl #ref_impl_generics ::core::iter::Extend<&'__crepe_extend #rel_ty> for Crepe #generics_args {
                     fn extend<__I>(&mut self, iter: __I)
                     where
-                        __I: ::core::iter::IntoIterator<Item = &'a #rel_ty>,
+                        __I: ::core::iter::IntoIterator<Item = &'__crepe_extend #rel_ty>,
                     {
                         self.extend(iter.into_iter().copied());
                     }
@@ -648,75 +712,59 @@ fn make_extend(context: &Context) -> proc_macro2::TokenStream {
 ///
 /// Here's an example of what might be generated for transitive closure:
 /// ```ignore
-/// fn run_with_hasher<CrepeHasher: BuildHasher + Default>(
-///     self,
-/// ) -> (::std::collections::HashSet<Tc, CrepeHasher>,) {
+/// fn run(self) -> (__CrepeSet<__CrepeCollections, Tc>,)
+/// where
+///     __CrepeCollections: crepe_support::SupportsRelationSet<Edge>,
+///     __CrepeCollections: crepe_support::SupportsRelationSet<Tc>,
+///     __CrepeCollections: crepe_support::SupportsRelationMap<(i32,), Tc>,
+/// {
+///     use crepe_support::{RelationMap as _, RelationSet as _};
+///
 ///     // Relations
-///     let mut __edge: ::std::collections::HashSet<Edge, CrepeHasher> =
-///         ::std::collections::HashSet::default();
-///     let mut __edge_update: ::std::collections::HashSet<Edge, CrepeHasher> =
-///         ::std::collections::HashSet::default();
-///     let mut __tc: ::std::collections::HashSet<Tc, CrepeHasher> =
-///         ::std::collections::HashSet::default();
-///     let mut __tc_update: ::std::collections::HashSet<Tc, CrepeHasher> =
-///         ::std::collections::HashSet::default();
+///     let mut __edge: __CrepeSet<__CrepeCollections, Edge> = Default::default();
+///     let mut __edge_update: __CrepeSet<__CrepeCollections, Edge> = Default::default();
+///     let mut __tc: __CrepeSet<__CrepeCollections, Tc> = Default::default();
+///     let mut __tc_update: __CrepeSet<__CrepeCollections, Tc> = Default::default();
 ///
 ///     // Indices
-///     let mut __tc_index_bf: ::std::collections::HashMap<
-///         (i32,),
-///         ::std::vec::Vec<Tc>,
-///         CrepeHasher,
-///     > = ::std::collections::HashMap::default();
+///     let mut __tc_index_bf: __CrepeMap<__CrepeCollections, (i32,), Tc> = Default::default();
 ///
 ///     // Input relations
 ///     __edge_update.extend(self.edge);
 ///
 ///     // Main loop, single stratum for simplicity
 ///     let mut __crepe_first_iteration = true;
-///     while __crepe_first_iteration || !(__edge_update.is_empty() && __tc_update.is_empty()) {
-///         __tc.extend(&__tc_update);
-///         for __crepe_var in &__tc_update {
-///             __tc_index_bf
-///                 .entry((__crepe_var.0,))
-///                 .or_default()
-///                 .push(*__crepe_var);
-///         }
-///         __edge.extend(&__edge_update);
+///     while __crepe_first_iteration || !__tc_update.is_empty() {
+///         __tc.extend_set(&__tc_update);
+///         __edge.extend_set(&__edge_update);
+///         __tc_index_bf.extend_from_set(&__tc_update, |__crepe_var| {
+///             (__crepe_var.1,)
+///         });
 ///
-///         let mut __tc_new: ::std::collections::HashSet<Tc, CrepeHasher> =
-///             ::std::collections::HashSet::default();
-///         let mut __edge_new: ::std::collections::HashSet<Edge, CrepeHasher> =
-///             ::std::collections::HashSet::default();
+///         let mut __tc_new: __CrepeSet<__CrepeCollections, Tc> = Default::default();
 ///
-///         for __crepe_var in &__edge {
+///         for __crepe_var in __edge.iter() {
 ///             let x = __crepe_var.0;
 ///             let y = __crepe_var.1;
 ///             let __crepe_goal = Tc(x, y);
-///             if !__tc.contains(&__crepe_goal) {
-///                 __tc_new.insert(__crepe_goal);
-///             }
+///             __tc_new.insert_if_missing(&__tc, __crepe_goal);
 ///         }
-///
-///         for __crepe_var in &__edge {
+///         for __crepe_var in __edge.iter() {
 ///             let x = __crepe_var.0;
 ///             let y = __crepe_var.1;
-///             if let Some(__crepe_iter) = __tc_index_bf.get(&(y,)) {
+///             if let Some(__crepe_iter) = __tc_index_bf.iter_key(&(y,)) {
 ///                 for __crepe_var in __crepe_iter {
 ///                     let z = __crepe_var.1;
 ///                     let __crepe_goal = Tc(x, z);
-///                     if !__tc.contains(&__crepe_goal) {
-///                         __tc_new.insert(__crepe_goal);
-///                     }
+///                     __tc_new.insert_if_missing(&__tc, __crepe_goal);
 ///                 }
 ///             }
 ///         }
 ///
 ///         __tc_update = __tc_new;
-///         __edge_update = __edge_new;
 ///         __crepe_first_iteration = false;
 ///     }
 ///
-///     // Return value
 ///     (__tc,)
 /// }
 /// ```
@@ -745,10 +793,10 @@ fn make_run(context: &Context) -> proc_macro2::TokenStream {
             let var_update = format_ident!("__{}_update", lower);
 
             quote! {
-                let mut #var: ::std::collections::HashSet<#rel_ty, CrepeHasher> =
-                    ::std::collections::HashSet::default();
-                let mut #var_update: ::std::collections::HashSet<#rel_ty, CrepeHasher> =
-                    ::std::collections::HashSet::default();
+                let mut #var: __CrepeSet<__CrepeCollections, #rel_ty> =
+                    ::core::default::Default::default();
+                let mut #var_update: __CrepeSet<__CrepeCollections, #rel_ty> =
+                    ::core::default::Default::default();
             }
         });
         let init_indices = indices.iter().map(|index| {
@@ -757,12 +805,11 @@ fn make_run(context: &Context) -> proc_macro2::TokenStream {
                 .expect("index relation should be found in context");
             let rel_ty = relation_type(rel, LifetimeUsage::Local);
             let index_name = index.to_ident();
-            let key_type = index.key_type(context);
+            let key_type = index.local_key_type(rel);
 
             quote! {
-                let mut #index_name:
-                    ::std::collections::HashMap<(#(#key_type,)*), ::std::vec::Vec<#rel_ty>, CrepeHasher> =
-                    ::std::collections::HashMap::default();
+                let mut #index_name: __CrepeMap<__CrepeCollections, (#(#key_type,)*), #rel_ty> =
+                    ::core::default::Default::default();
             }
         });
         let load_inputs = context.rels_input.values().map(|rel| {
@@ -788,20 +835,19 @@ fn make_run(context: &Context) -> proc_macro2::TokenStream {
         }
     };
 
-    let output_ty_hasher = make_output_ty(context, quote! { CrepeHasher });
-    let output_ty_default = make_output_ty(context, quote! {});
+    let output_ty = make_output_ty(context);
+    let run_where = make_collection_where_clause(context, &indices);
     quote! {
         #[allow(clippy::collapsible_if)]
-        pub fn run_with_hasher<CrepeHasher: ::std::hash::BuildHasher + ::core::default::Default>(
-            self
-        ) -> #output_ty_hasher {
+        pub fn run(self) -> #output_ty
+        where
+            #run_where
+        {
+            use ::crepe_support::{RelationMap as _, RelationSet as _};
+
             #initialize
             #main_loops
             #output
-        }
-
-        pub fn run(self) -> #output_ty_default {
-            self.run_with_hasher::<::std::collections::hash_map::RandomState>()
         }
     }
 }
@@ -840,8 +886,8 @@ fn make_stratum(
             let lower = to_lowercase(&rel.name);
             let rel_new = format_ident!("__{}_new", lower);
             quote! {
-                let mut #rel_new: ::std::collections::HashSet<#rel_ty, CrepeHasher> =
-                    ::std::collections::HashSet::default();
+                let mut #rel_new: __CrepeSet<__CrepeCollections, #rel_ty> =
+                    ::core::default::Default::default();
             }
         })
         .collect();
@@ -890,7 +936,7 @@ fn make_updates(
         let rel = format_ident!("__{}", lower);
         let rel_update = format_ident!("__{}_update", lower);
         quote! {
-            #rel.extend(&#rel_update);
+            #rel.extend_set(&#rel_update);
         }
     });
     let index_updates = indices.iter().filter_map(|index| {
@@ -907,24 +953,21 @@ fn make_updates(
 
         let index_name = index.to_ident();
         let index_name_update = format_ident!("{}_update", index_name);
-        let key_type = index.key_type(context);
+        let key_type = index.local_key_type(rel);
         let bound_pos = index.bound_pos();
         Some(quote! {
-            let mut #index_name_update: ::std::collections::HashMap<
+            let mut #index_name_update: __CrepeMap<
+                __CrepeCollections,
                 (#(#key_type,)*),
-                ::std::vec::Vec<#rel_ty>,
-                CrepeHasher
-            > = ::std::collections::HashMap::default();
-            for __crepe_var in &#rel_update {
-                #index_name
-                    .entry((#(__crepe_var.#bound_pos,)*))
-                    .or_default()
-                    .push(*__crepe_var);
-                #index_name_update
-                    .entry((#(__crepe_var.#bound_pos,)*))
-                    .or_default()
-                    .push(*__crepe_var);
-            }
+                #rel_ty
+            > =
+                ::core::default::Default::default();
+            #index_name.extend_from_set(&#rel_update, |__crepe_var| {
+                (#(__crepe_var.#bound_pos,)*)
+            });
+            #index_name_update.extend_from_set(&#rel_update, |__crepe_var| {
+                (#(__crepe_var.#bound_pos,)*)
+            });
         })
     });
     rel_updates.chain(index_updates).collect()
@@ -942,9 +985,7 @@ fn make_rule(
         let name_new = format_ident!("__{}_new", to_lowercase(relation));
         quote! {
             let __crepe_goal = #relation(#fields);
-            if !#name.contains(&__crepe_goal) {
-                #name_new.insert(__crepe_goal);
-            }
+            #name_new.insert_if_missing(&#name, __crepe_goal);
         }
     };
     let fact_positions: Vec<_> = rule
@@ -1034,7 +1075,7 @@ fn make_clause(
                     .collect();
                 return Box::new(move |body| {
                     quote_spanned! {fact.relation.span()=>
-                        if !#index_name.contains_key(&(#(#bound_fields,)*)) {
+                        if #index_name.is_key_absent(&(#(#bound_fields,)*)) {
                             #body
                         }
                     }
@@ -1081,7 +1122,7 @@ fn make_clause(
                 // If no fields are bound, we don't need an index
                 Box::new(move |body| {
                     quote_spanned! {fact.relation.span()=>
-                        for __crepe_var in &#rel {
+                        for __crepe_var in #rel.iter() {
                             #setters
                             #body
                         }
@@ -1108,7 +1149,7 @@ fn make_clause(
                 indices.insert(index);
                 Box::new(move |body| {
                     quote_spanned! {fact.relation.span()=>
-                        if let Some(__crepe_iter) = #index_name.get(&(#(#bound_fields,)*)) {
+                        if let Some(__crepe_iter) = #index_name.iter_key(&(#(#bound_fields,)*)) {
                             for __crepe_var in __crepe_iter {
                                 #setters
                                 #body
@@ -1148,15 +1189,101 @@ fn make_clause(
     }
 }
 
-fn make_output_ty(context: &Context, hasher: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+fn make_output_ty(context: &Context) -> proc_macro2::TokenStream {
     let fields = context.output_order.iter().map(|name| {
         let rel = context.rels_output.get(&name.to_string()).unwrap();
         relation_type(rel, LifetimeUsage::Item)
     });
 
     quote! {
-        (#(::std::collections::HashSet<#fields, #hasher>,)*)
+        (#(__CrepeSet<__CrepeCollections, #fields>,)*)
     }
+}
+
+fn make_collection_where_clause(
+    context: &Context,
+    indices: &HashSet<Index>,
+) -> proc_macro2::TokenStream {
+    let set_bounds = context.all_relations().map(|rel| {
+        with_relation_lifetime(rel, |rel_ty, _| {
+            quote! {
+                __CrepeCollections: ::crepe_support::SupportsRelationSet<#rel_ty>,
+            }
+        })
+    });
+
+    let index_bounds = indices.iter().map(|index| {
+        let rel = context
+            .get_relation(&index.name.to_string())
+            .expect("index relation should be found in context");
+        with_relation_lifetime(rel, |rel_ty, lifetime| {
+            let key_type = index.key_type(rel, lifetime);
+            quote! {
+                __CrepeCollections:
+                    ::crepe_support::SupportsRelationMap<(#(#key_type,)*), #rel_ty>,
+            }
+        })
+    });
+
+    quote! {
+        #(#set_bounds)*
+        #(#index_bounds)*
+    }
+}
+
+fn with_relation_lifetime<F>(rel: &Relation, make_bound: F) -> proc_macro2::TokenStream
+where
+    F: FnOnce(proc_macro2::TokenStream, Option<&Lifetime>) -> proc_macro2::TokenStream,
+{
+    if rel.generics.lifetimes().next().is_some() {
+        let lifetime = Lifetime::new("'__crepe_relation", rel.name.span());
+        let rel_ty = relation_type_with_lifetime(rel, LifetimeUsage::Item, Some(&lifetime));
+        let bound = make_bound(rel_ty, Some(&lifetime));
+        quote! {
+            for<#lifetime> #bound
+        }
+    } else {
+        let rel_ty = relation_type(rel, LifetimeUsage::Item);
+        make_bound(rel_ty, None)
+    }
+}
+
+fn replace_relation_lifetimes(ty: &Type, rel: &Relation, lifetime: Option<&Lifetime>) -> Type {
+    let Some(lifetime) = lifetime else {
+        return ty.clone();
+    };
+
+    let relation_lifetimes: HashSet<String> = rel
+        .generics
+        .lifetimes()
+        .map(|l| l.lifetime.ident.to_string())
+        .collect();
+    if relation_lifetimes.is_empty() {
+        return ty.clone();
+    }
+
+    struct ReplaceRelationLifetimes {
+        names: HashSet<String>,
+        lifetime: Lifetime,
+    }
+
+    impl VisitMut for ReplaceRelationLifetimes {
+        fn visit_lifetime_mut(&mut self, lifetime: &mut Lifetime) {
+            if self.names.contains(&lifetime.ident.to_string()) {
+                *lifetime = self.lifetime.clone();
+            } else {
+                visit_mut::visit_lifetime_mut(self, lifetime);
+            }
+        }
+    }
+
+    let mut ty = ty.clone();
+    ReplaceRelationLifetimes {
+        names: relation_lifetimes,
+        lifetime: lifetime.clone(),
+    }
+    .visit_type_mut(&mut ty);
+    ty
 }
 
 /// Returns whether an expression in a relation is a Datalog variable.
@@ -1317,17 +1444,16 @@ fn has_bound(tp: &syn::TypeParam, bound_name: &str) -> bool {
     })
 }
 
-/// Required trait bounds for all generic types in Datalog relations.
-const REQUIRED_BOUNDS: &[&str] = &["Hash", "Eq", "Clone", "Copy", "Default"];
+/// Required trait bounds for all generic types in generated relation values.
+const REQUIRED_BOUNDS: &[&str] = &["Eq", "PartialEq", "Clone", "Copy"];
 
 /// Get the TokenStream for a required bound.
 fn required_bound_token(name: &str) -> proc_macro2::TokenStream {
     match name {
-        "Hash" => quote! { ::core::hash::Hash },
-        "Eq" => quote! { ::std::cmp::Eq },
-        "Clone" => quote! { ::std::clone::Clone },
-        "Copy" => quote! { ::std::marker::Copy },
-        "Default" => quote! { ::std::default::Default },
+        "Eq" => quote! { ::core::cmp::Eq },
+        "PartialEq" => quote! { ::core::cmp::PartialEq },
+        "Clone" => quote! { ::core::clone::Clone },
+        "Copy" => quote! { ::core::marker::Copy },
         _ => panic!("Unknown required bound: {}", name),
     }
 }
@@ -1363,8 +1489,22 @@ fn format_generics(items: Vec<proc_macro2::TokenStream>) -> proc_macro2::TokenSt
     }
 }
 
-/// Create a TokenStream for generic parameters (lifetimes + type params).
-fn generic_params_decl(context: &Context) -> proc_macro2::TokenStream {
+fn collection_param(with_default: bool) -> proc_macro2::TokenStream {
+    if with_default {
+        quote! { __CrepeCollections = ::crepe_support::DefaultCrepeCollections }
+    } else {
+        quote! { __CrepeCollections }
+    }
+}
+
+/// Create a TokenStream for generic parameters (lifetimes + type params + collections).
+fn generic_params_decl(context: &Context, collection_default: bool) -> proc_macro2::TokenStream {
+    let mut items = generic_param_items_without_collection(context);
+    items.push(collection_param(collection_default));
+    format_generics(items)
+}
+
+fn generic_param_items_without_collection(context: &Context) -> Vec<proc_macro2::TokenStream> {
     let mut items = Vec::new();
     if context.has_input_lifetime {
         items.push(quote! { 'a });
@@ -1374,11 +1514,17 @@ fn generic_params_decl(context: &Context) -> proc_macro2::TokenStream {
             .into_iter()
             .map(merge_bounds_with_required),
     );
-    format_generics(items)
+    items
 }
 
 /// Create a TokenStream for generic arguments (just the names, no bounds).
 fn generic_params_args(context: &Context) -> proc_macro2::TokenStream {
+    let mut items = generic_arg_items_without_collection(context);
+    items.push(quote! { __CrepeCollections });
+    format_generics(items)
+}
+
+fn generic_arg_items_without_collection(context: &Context) -> Vec<proc_macro2::TokenStream> {
     let mut items = Vec::new();
     if context.has_input_lifetime {
         items.push(quote! { 'a });
@@ -1387,9 +1533,10 @@ fn generic_params_args(context: &Context) -> proc_macro2::TokenStream {
         let ident = &tp.ident;
         quote! { #ident }
     }));
-    format_generics(items)
+    items
 }
 
+#[derive(Clone, Copy)]
 enum LifetimeUsage {
     Item,
     Local,
@@ -1397,6 +1544,14 @@ enum LifetimeUsage {
 
 /// Returns the type of a relation, with appropriate lifetimes and type parameters.
 fn relation_type(rel: &Relation, usage: LifetimeUsage) -> proc_macro2::TokenStream {
+    relation_type_with_lifetime(rel, usage, None)
+}
+
+fn relation_type_with_lifetime(
+    rel: &Relation,
+    usage: LifetimeUsage,
+    lifetime: Option<&Lifetime>,
+) -> proc_macro2::TokenStream {
     let symbol = match rel.relation_type().unwrap() {
         RelationType::Input | RelationType::Output => "'a",
         RelationType::Intermediate => match usage {
@@ -1410,7 +1565,9 @@ fn relation_type(rel: &Relation, usage: LifetimeUsage) -> proc_macro2::TokenStre
     // Build list of generic arguments
     let mut items = Vec::new();
     items.extend(rel.generics.lifetimes().map(|l| {
-        let lifetime = Lifetime::new(symbol, l.span());
+        let lifetime = lifetime
+            .cloned()
+            .unwrap_or_else(|| Lifetime::new(symbol, l.span()));
         quote! { #lifetime }
     }));
     items.extend(rel.generics.type_params().map(|tp| {

@@ -128,6 +128,39 @@ closure for large graphs (~10<sup>6</sup> relations) run at comparable speed to
 compiled [Souffle](https://souffle-lang.github.io/), and use a fraction of the
 compilation time.
 
+## Custom Collections
+
+Generated runtimes are generic over a collection family from `crepe_support`.
+Implement `CrepeCollections` with relation set, relation map, and per-key
+collection types to use your own storage, or use the included
+`OrderedCrepeCollections` when you want ordered output.
+
+```rust
+use crepe::crepe;
+
+crepe! {
+    @input
+    #[derive(Ord, PartialOrd)]
+    struct Edge(i32, i32);
+
+    @output
+    #[derive(Ord, PartialOrd)]
+    struct Reachable(i32, i32);
+
+    Reachable(x, y) <- Edge(x, y);
+    Reachable(x, z) <- Edge(x, y), Reachable(y, z);
+}
+
+fn main() {
+    let mut runtime =
+        Crepe::<crepe_support::OrderedCrepeCollections>::new_with_collections();
+    runtime.extend([Edge(1, 2), Edge(2, 3)]);
+
+    let (reachable,) = runtime.run();
+    assert!(reachable.contains(&Reachable(1, 3)));
+}
+```
+
 For benchmarks, see the [`benches/` directory](benches/).
 The benchmarks can be run using `cargo bench`.
 

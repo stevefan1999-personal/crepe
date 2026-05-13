@@ -20,7 +20,7 @@ fn collatz_length(n: u128) -> usize {
 
     rt.extend([Start(n)]);
 
-    let (cols,) = rt.run_with_hasher::<fnv::FnvBuildHasher>();
+    let (cols,) = rt.run();
     cols.len() - 1
 }
 

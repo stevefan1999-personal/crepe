@@ -23,7 +23,7 @@ fn fibonacci_length(n: u128) -> usize {
 
     rt.extend([Depth(n)]);
 
-    let (fibs,) = rt.run_with_hasher::<fnv::FnvBuildHasher>();
+    let (fibs,) = rt.run();
     fibs.len()
 }
 

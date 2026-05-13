@@ -41,7 +41,7 @@ fn walk(n: usize) -> (usize, usize) {
 
     let mut runtime = Crepe::new();
     runtime.extend(edges);
-    let (walk, nowalk) = runtime.run_with_hasher::<fnv::FnvBuildHasher>();
+    let (walk, nowalk) = runtime.run();
     (walk.len(), nowalk.len())
 }
 

@@ -1,17 +1,16 @@
-// Test that duplicate bounds are not added
+// Test that duplicate generated bounds are not added
 
 use crepe::crepe;
-use std::hash::Hash;
 
-#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, Default)]
+#[derive(Eq, PartialEq, Clone, Copy, Debug, Default)]
 struct Value(i32);
 
 crepe! {
     @input
-    struct Input<T: Hash>(T);
+    struct Input<T: Copy>(T);
 
     @output
-    struct Output<T: Hash>(T);
+    struct Output<T: Copy>(T);
 
     Output(x) <- Input(x);
 }
