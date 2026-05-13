@@ -1,0 +1,21 @@
+[package]
+name = "crepe-macro"
+version = "0.2.0"
+authors = ["Eric Zhang <ekzhang1@gmail.com>"]
+license = "MIT OR Apache-2.0"
+description = "Procedural macro implementation for crepe"
+repository = "https://github.com/ekzhang/crepe"
+documentation = "https://docs.rs/crepe-macro"
+edition = "2018"
+
+[lib]
+proc-macro = true
+bench = false
+
+[dependencies]
+crepe-support = { path = "../crepe-support", version = "0.2.0" }
+syn = { version = "2.0", features = ["full", "visit-mut"] }
+quote = "1.0"
+proc-macro2 = "1.0"
+proc-macro-error = "1.0"
+petgraph = "0.6"

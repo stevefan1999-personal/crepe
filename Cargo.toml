@@ -11,10 +11,9 @@ readme = "README.md"
 edition = "2018"
 
 [workspace]
-members = ["crepe-support"]
+members = ["crepe-support", "crepe-macro"]
 
 [lib]
-proc-macro = true
 bench = false
 
 [[bench]]
@@ -34,9 +33,5 @@ trybuild = "1.0.79"
 criterion = { version = "0.4.0", features = ["html_reports"] }
 
 [dependencies]
+crepe-macro = { path = "crepe-macro", version = "0.2.0" }
 crepe-support = { path = "crepe-support", version = "0.2.0" }
-syn = { version = "2.0", features = ["full", "visit-mut"] }
-quote = "1.0"
-proc-macro2 = "1.0"
-proc-macro-error = "1.0"
-petgraph = "0.6"
