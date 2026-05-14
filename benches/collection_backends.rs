@@ -73,20 +73,6 @@ fn run_std(edges: &[Edge]) -> usize {
         + nodes.len()
 }
 
-#[cfg(feature = "fnv")]
-fn run_fnv(edges: &[Edge]) -> usize {
-    let mut runtime = Crepe::<crepe::FnvCrepeCollections>::new_with_collections();
-    runtime.extend(edges.iter().copied());
-    let (reachable, reverse, two_hop, three_hop, cheap_two_hop, endpoints, nodes) = runtime.run();
-    reachable.len()
-        + reverse.len()
-        + two_hop.len()
-        + three_hop.len()
-        + cheap_two_hop.len()
-        + endpoints.len()
-        + nodes.len()
-}
-
 #[cfg(feature = "hashbrown")]
 fn run_hashbrown(edges: &[Edge]) -> usize {
     let mut runtime = Crepe::<crepe::HashbrownCrepeCollections>::new_with_collections();
@@ -127,14 +113,9 @@ fn criterion_benchmark(c: &mut Criterion) {
             b.iter(|| black_box(run_std(black_box(edges))));
         });
 
-        #[cfg(feature = "fnv")]
-        group.bench_with_input(BenchmarkId::new("fnv_hash", nodes), &edges, |b, edges| {
-            b.iter(|| black_box(run_fnv(black_box(edges))));
-        });
-
         #[cfg(feature = "hashbrown")]
         group.bench_with_input(
-            BenchmarkId::new("hashbrown_fnv", nodes),
+            BenchmarkId::new("hashbrown", nodes),
             &edges,
             |b, edges| {
                 b.iter(|| black_box(run_hashbrown(black_box(edges))));

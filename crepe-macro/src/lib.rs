@@ -553,7 +553,6 @@ impl Display for Index {
 fn make_struct_decls(context: &Context) -> proc_macro2::TokenStream {
     let derive_hash = cfg!(any(
         feature = "std",
-        feature = "fnv",
         feature = "hashbrown",
         feature = "heapless"
     ));

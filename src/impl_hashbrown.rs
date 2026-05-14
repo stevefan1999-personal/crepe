@@ -47,11 +47,11 @@ where
     }
 }
 
-/// Crepe collection family backed by hashbrown maps and sets with FNV hashing.
+/// Crepe collection family backed by hashbrown maps and sets with hashbrown's default hasher.
 pub struct HashbrownCrepeCollections;
 
 impl CrepeCollections for HashbrownCrepeCollections {
-    type Set<T> = hashbrown::HashSet<T, fnv::FnvBuildHasher>;
-    type Map<K, V> = hashbrown::HashMap<K, Vec<V>, fnv::FnvBuildHasher>;
+    type Set<T> = hashbrown::HashSet<T>;
+    type Map<K, V> = hashbrown::HashMap<K, Vec<V>>;
     type Collection<T> = Vec<T>;
 }

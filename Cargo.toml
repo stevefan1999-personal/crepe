@@ -38,14 +38,12 @@ criterion = { version = "0.8.2", features = ["html_reports"] }
 
 [dependencies]
 crepe-macro = { path = "crepe-macro", version = "0.2.0" }
-fnv = { version = "1.0.7", optional = true, default-features = false }
-hashbrown = { version = "0.17.1", optional = true, default-features = false, features = ["alloc", "equivalent", "inline-more"] }
+hashbrown = { version = "0.17.1", optional = true, default-features = false, features = ["alloc", "default-hasher", "equivalent", "inline-more"] }
 heapless = { version = "0.9.3", optional = true, default-features = false }
 
 [features]
 default = ["std"]
-std = ["alloc", "crepe-macro/std", "fnv?/std"]
-fnv = ["dep:fnv", "hashbrown", "crepe-macro/fnv"]
-hashbrown = ["alloc", "dep:fnv", "dep:hashbrown", "crepe-macro/hashbrown"]
+std = ["alloc", "crepe-macro/std"]
+hashbrown = ["alloc", "dep:hashbrown", "crepe-macro/hashbrown"]
 heapless = ["dep:heapless", "crepe-macro/heapless"]
 alloc = ["crepe-macro/alloc"]

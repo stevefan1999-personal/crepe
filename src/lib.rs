@@ -17,12 +17,11 @@ pub use crepe_macro::crepe;
 
 #[cfg(not(any(
     feature = "std",
-    feature = "fnv",
     feature = "hashbrown",
     feature = "heapless"
 )))]
 compile_error!(
-    "enable at least one crepe collection backend feature: std, fnv, hashbrown, or heapless"
+    "enable at least one crepe collection backend feature: std, hashbrown, or heapless"
 );
 
 /// A collection of relation values stored under one relation-map key.
@@ -132,17 +131,12 @@ mod impl_alloc;
 #[cfg(feature = "std")]
 mod impl_std;
 
-#[cfg(feature = "fnv")]
-mod impl_fnv;
-
 #[cfg(feature = "hashbrown")]
 mod impl_hashbrown;
 
 #[cfg(feature = "heapless")]
 mod impl_heapless;
 
-#[cfg(feature = "fnv")]
-pub use impl_fnv::FnvCrepeCollections;
 #[cfg(feature = "hashbrown")]
 pub use impl_hashbrown::HashbrownCrepeCollections;
 #[cfg(feature = "heapless")]
@@ -151,20 +145,16 @@ pub use impl_heapless::{HeaplessCrepeCollections, HeaplessRelationSet};
 pub use impl_std::StdCrepeCollections;
 
 /// Default crepe collection family selected by enabled features.
-#[cfg(feature = "fnv")]
-pub type DefaultCrepeCollections = FnvCrepeCollections;
-
-/// Default crepe collection family selected by enabled features.
-#[cfg(all(not(feature = "fnv"), feature = "std"))]
+#[cfg(feature = "std")]
 pub type DefaultCrepeCollections = StdCrepeCollections;
 
 /// Default crepe collection family selected by enabled features.
-#[cfg(all(not(any(feature = "fnv", feature = "std")), feature = "hashbrown"))]
+#[cfg(all(not(feature = "std"), feature = "hashbrown"))]
 pub type DefaultCrepeCollections = HashbrownCrepeCollections;
 
 /// Default crepe collection family selected by enabled features.
 #[cfg(all(
-    not(any(feature = "fnv", feature = "std", feature = "hashbrown")),
+    not(any(feature = "std", feature = "hashbrown")),
     feature = "heapless"
 ))]
 pub type DefaultCrepeCollections = HeaplessCrepeCollections<DEFAULT_FIXED_CAPACITY>;
