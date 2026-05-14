@@ -1,4 +1,6 @@
-use crepe_support::{CrepeCollections, RelationCollection, RelationMap, RelationSet};
+#![cfg(any(feature = "std", feature = "fnv", feature = "hashbrown"))]
+
+use crepe::{CrepeCollections, RelationCollection, RelationMap, RelationSet};
 
 struct VecRelationSet<T>(Vec<T>);
 
@@ -133,36 +135,5 @@ mod vector_collections {
             results,
             vec![(1, 2), (1, 3), (1, 4), (2, 3), (2, 4), (3, 4)]
         );
-    }
-}
-
-mod btree_collections {
-    use crepe::crepe;
-
-    crepe! {
-        @input
-        #[derive(Ord, PartialOrd)]
-        struct OrderedInput<T: Ord>(T);
-
-        @output
-        #[derive(Ord, PartialOrd)]
-        struct OrderedOutput<T: Ord>(T);
-
-        OrderedOutput(x) <- OrderedInput(x);
-    }
-
-    #[test]
-    fn ordered_collections_use_ordered_storage() {
-        #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Debug)]
-        struct OrderedNode(i32);
-
-        let mut runtime =
-            Crepe::<OrderedNode, crepe_support::OrderedCrepeCollections>::new_with_collections();
-        runtime.extend([OrderedInput(OrderedNode(3)), OrderedInput(OrderedNode(1))]);
-
-        let (output,) = runtime.run();
-        let results: Vec<_> = output.iter().map(|value| value.0 .0).collect();
-
-        assert_eq!(results, vec![1, 3]);
     }
 }

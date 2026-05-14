@@ -12,7 +12,7 @@ pub struct Strata {
 
 impl Strata {
     pub fn new(relations: HashSet<Ident>, dependencies: HashSet<(&Ident, &Ident)>) -> Self {
-        let mut graph = DiGraphMap::new();
+        let mut graph = DiGraphMap::<_, _>::new();
         for ident in relations.iter() {
             graph.add_node(ident);
         }

@@ -130,21 +130,30 @@ compilation time.
 
 ## Custom Collections
 
-Generated runtimes are generic over a collection family from `crepe_support`.
+Generated runtimes are generic over a collection family from `crepe`.
 Implement `CrepeCollections` with relation set, relation map, and per-key
 collection types to use your own storage, or use the included
-`OrderedCrepeCollections` when you want ordered output.
+FNV/hashbrown/std/heapless families.
+
+Collection backends are feature-selected. The default feature is `std`; when
+multiple backends are enabled, the default collection family is selected in
+this order: `fnv`, `std`, `hashbrown`, then `heapless`.
+Enable `fnv` to use `FnvCrepeCollections`, which is optimized for small,
+trusted hash keys and uses hashbrown storage when `std` is not enabled. The
+`hashbrown` backend also uses FNV hashing, but with hashbrown's SwissTable
+storage. `Vec<T>` is still used as the per-key collection for alloc-backed hash
+maps, but there is no built-in Vec-backed relation set or map.
+The fixed-capacity heapless family uses a const generic capacity, for example
+`HeaplessCrepeCollections<32>`.
 
 ```rust
 use crepe::crepe;
 
 crepe! {
     @input
-    #[derive(Ord, PartialOrd)]
     struct Edge(i32, i32);
 
     @output
-    #[derive(Ord, PartialOrd)]
     struct Reachable(i32, i32);
 
     Reachable(x, y) <- Edge(x, y);
@@ -153,7 +162,7 @@ crepe! {
 
 fn main() {
     let mut runtime =
-        Crepe::<crepe_support::OrderedCrepeCollections>::new_with_collections();
+        Crepe::<crepe::FnvCrepeCollections>::new_with_collections();
     runtime.extend([Edge(1, 2), Edge(2, 3)]);
 
     let (reachable,) = runtime.run();
